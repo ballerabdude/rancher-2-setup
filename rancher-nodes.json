@@ -1,0 +1,340 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Parameters" : {
+    "Environment": {
+      "Description": "Environment:  dev, qa, or prod",
+      "Type": "String",
+      "Default": "prod",
+      "AllowedValues" : [ "dev", "prod", "qa"]
+    },
+    "BaseAMI" : {
+      "Description" : "Rancher OS AMI",
+      "Type" : "AWS::EC2::Image::Id",
+      "Default" : "ami-a7151cdd"
+    },
+    "VpcId" : {
+      "Description": "VPC",
+      "Type": "AWS::EC2::VPC::Id"
+    },
+    "VpcSubnetIds" : {
+      "Description": "VPC Subnets",
+      "Type": "List<AWS::EC2::Subnet::Id>"
+    },
+    "DesiredCapacity": {
+      "Type": "Number",
+      "Default" : "1",
+      "Description": "Number of instances to launch in your ECS cluster"
+    },
+    "MaxSize": {
+      "Type": "Number",
+      "Default" : "5",
+      "Description": "Maximum number of instances that can be launched in your ECS cluster"
+    },
+    "MinSize": {
+      "Type": "Number",
+      "Default" : "3",
+      "Description": "Maximum number of instances that can be launched in your ECS cluster"
+    },
+    "InstanceSize": {
+      "Type": "Number",
+      "Default" : "50",
+      "Description": "Size in GB"
+    },
+    "KeyName" : {
+      "Description" : "SSH KeyPair Name",
+      "Type" : "AWS::EC2::KeyPair::KeyName"
+    },
+    "Route53HostedZoneIDARN": {
+      "Type": "String",
+      "Description": "Hosted Zone ID for RANCHER DNS ex: arn:aws:route53:::hostedzone/<ID>"
+    },
+    "InstanceType" : {
+      "Description" : "The EC2 instance type",
+      "Type" : "String",
+      "Default" : "t2.medium",
+      "AllowedValues" : ["t2.medium", "m5.large", "m5.xlarge", "m5.2xlarge", "m5.4xlarge", "m5.12xlarge", "m5.24xlarge", "m4.large", "m4.xlarge", "m4.2xlarge", "m4.4xlarge", "m4.10xlarge", "c4.large", "c4.xlarge", "c4.2xlarge", "c4.4xlarge", "c4.8xlarge", "c5.large", "c5.xlarge", "c5.2xlarge", "c5.4xlarge", "c4.9xlarge", "c4.18xlarge" ],
+      "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+    "CPUAlarmHighEvalPeriods": {
+      "Type": "String",
+      "Default": "1"
+    },
+    "CPUAlarmHighThreshold": {
+      "Type": "String",
+      "Default": "80"
+    },
+    "CPUAlarmLowThreshold": {
+      "Type": "String",
+      "Default": "60"
+    },
+    "CPUAlarmLowEvalPeriods": {
+      "Type": "String",
+      "Default": "5"
+    },
+    "AlarmPeriod": {
+      "Type": "String",
+      "Default": "60"
+    },
+    "ClusterName": {
+      "Type": "String"
+    },
+    "HTTPTargetGroupARN" : {
+      "Description" : "ALB HTTP Target Group arn",
+      "Type" : "String"
+    },
+    "HTTPSTargetGroupARN" : {
+      "Description" : "ALB HTTPS Target Group arn",
+      "Type" : "String"
+    },
+    "RancherClusterDockerCMD" : {
+      "Description" : "Docker CMD to join cluster",
+      "Type" : "String"
+    }
+  },
+
+  "Resources" : {
+
+    "AutoScalingGroup": {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "Tags": [
+          { "Key" : "Name", "Value" : { "Fn::Join" : ["-", ["Rancher-Cluster", {"Ref": "ClusterName"}]]}, "PropagateAtLaunch": true  },
+          { "Key" : { "Fn::Join" : ["", ["kubernetes.io/cluster/", {"Ref": "ClusterName"}]]}, "Value" : "owned", "PropagateAtLaunch": true  }
+        ],
+        "DesiredCapacity": {"Ref": "DesiredCapacity"},
+        "MinSize": {"Ref": "MinSize"},
+        "MaxSize": {"Ref": "MaxSize"},
+        "TargetGroupARNs": [
+          { "Ref": "HTTPTargetGroupARN" },
+          { "Ref": "HTTPSTargetGroupARN" }
+        ],
+        "LaunchConfigurationName": { "Ref": "LaunchConfig" },
+        "VPCZoneIdentifier": { "Ref": "VpcSubnetIds" }
+      },
+      "UpdatePolicy" : {
+        "AutoScalingScheduledAction" : {
+          "IgnoreUnmodifiedGroupSizeProperties" : "true"
+        },
+        "AutoScalingRollingUpdate" : {
+          "MinInstancesInService" : {"Ref": "DesiredCapacity"},
+          "MaxBatchSize" : "1",
+          "PauseTime" : "PT0S"
+        }
+      }
+    },
+    "ComponentScaleUpPolicy": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AutoScalingGroupName": {
+          "Ref": "AutoScalingGroup"
+        },
+        "AdjustmentType": "ChangeInCapacity",
+        "Cooldown": 240,
+        "ScalingAdjustment": 1
+      }
+    },
+    "ComponentScaleDownPolicy": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AutoScalingGroupName": {
+          "Ref": "AutoScalingGroup"
+        },
+        "AdjustmentType": "ChangeInCapacity",
+        "Cooldown": 60,
+        "ScalingAdjustment": -1
+      }
+    },
+    "CPUAlarmHigh": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-up if CPU > 80% for 1 minutes",
+        "Threshold": {
+          "Ref": "CPUAlarmHighThreshold"
+        },
+        "AlarmActions": [
+          {
+            "Ref": "ComponentScaleUpPolicy"
+          }
+        ],
+        "ComparisonOperator": "GreaterThanThreshold",
+        "EvaluationPeriods": {
+          "Ref": "CPUAlarmHighEvalPeriods"
+        },
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": {
+          "Ref": "AlarmPeriod"
+        },
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": {
+              "Ref": "AutoScalingGroup"
+            }
+          }
+        ]
+      }
+    },
+    "CPUAlarmLow": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-down if CPU < 60% for 5 minutes",
+        "Threshold": {
+          "Ref": "CPUAlarmLowThreshold"
+        },
+        "AlarmActions": [
+          {
+            "Ref": "ComponentScaleDownPolicy"
+          }
+        ],
+        "ComparisonOperator": "LessThanThreshold",
+        "EvaluationPeriods": {
+          "Ref": "CPUAlarmLowEvalPeriods"
+        },
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": {
+          "Ref": "AlarmPeriod"
+        },
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": {
+              "Ref": "AutoScalingGroup"
+            }
+          }
+        ]
+      }
+    },
+    "LaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+
+        "SecurityGroups": [ 
+          { "Ref": "SecurityGroup" } 
+        ],
+        "ImageId": { "Ref" : "BaseAMI" },
+        "InstanceType"   : { "Ref" : "InstanceType" },
+        "KeyName"        : { "Ref" : "KeyName" },
+        "IamInstanceProfile": { "Ref": "EC2NodeInstanceProfile" },
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#cloud-config\n",
+          "rancher:\n",
+          "write_files:\n",
+          "  - path: /etc/rc.local\n",
+          "    permissions: \"0755\"\n",
+          "    owner: root\n",
+          "    content: |\n",
+          "      #!/bin/bash\n",
+          "      wait-for-docker\n",
+          "      ", {"Ref": "RancherClusterDockerCMD"},"\n"
+                
+        ]]}},
+        "BlockDeviceMappings" : [
+          {
+            "DeviceName" : "/dev/sda1",
+            "Ebs" : { "VolumeSize" : { "Ref": "InstanceSize" }, "VolumeType" : "gp2" }
+          }
+        ]
+      }
+    },
+    
+    "SecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Security Group for rancher server",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [
+
+          { "IpProtocol" : "-1", "FromPort" : "0", "ToPort" : "65535", "CidrIp" : "0.0.0.0/0" }
+        ],
+        "SecurityGroupEgress" : [
+          { "IpProtocol" : "-1", "FromPort" : "0", "ToPort" : "65535", "CidrIp" : "0.0.0.0/0" }
+        ]
+      }
+    },
+
+    "EC2NodeRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "kubernete-services",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:*",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "ec2:*",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "elasticloadbalancing:*",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "route53:ChangeResourceRecordSets"
+                  ],
+                  "Resource": [
+                    "arn:aws:route53:::hostedzone/*"
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "route53:ListHostedZones",
+                    "route53:ListResourceRecordSets"
+                  ],
+                  "Resource": [
+                    "*"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "EC2NodeInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "EC2NodeRole"
+          }
+        ]
+      }
+    }
+
+  },
+
+  "Outputs" : {
+
+  }
+}

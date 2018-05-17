@@ -1,0 +1,190 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Sites",
+  "Parameters": {
+    "Environment": {
+      "Description": "Environment:  dev, qa, or prod",
+      "Type": "String",
+      "Default": "dev",
+      "AllowedValues" : [ "dev", "prod", "qa"]
+    },
+    "HostedZoneName": {
+      "Description": "Hosted Zone Name",
+      "Type": "String",
+      "Default": "example.com"
+    },
+    "VpcId" : {
+      "Description": "VPC",
+      "Type": "AWS::EC2::VPC::Id"
+    },
+    "PrivateVpcSubnetIds" : {
+      "Description": "VPC Subnets",
+      "Type": "List<AWS::EC2::Subnet::Id>"
+    },
+    "IAMCertificateARN": {
+      "Description": "SSL IAM Certificate ARN - *.example.com",
+      "Type": "String"
+    }
+  },
+  "Resources" : {
+
+    "Route53Record": {
+      "Type" : "AWS::Route53::RecordSetGroup",
+      "DependsOn": ["InternalLB"],
+      "Properties" : {
+        "HostedZoneName" : { "Fn::Join": ["", [ { "Ref": "HostedZoneName" }, "."] ] },
+        "Comment" : "DNS Zone alias targeted to Athena ALB ",
+        "RecordSets" : [
+          {
+            "Name" : { "Fn::Join": ["", [ "*", ".", { "Ref": "HostedZoneName" }, "."] ] },
+            "Type" : "A",
+            "AliasTarget" : {
+              "HostedZoneId" : { "Fn::GetAtt" : ["InternalLB", "CanonicalHostedZoneID"] },
+              "DNSName" : { "Fn::GetAtt" : ["InternalLB","DNSName"] }
+            }
+          }
+
+        ]
+      }
+    },
+    "InternalSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "Tags" : [
+          { "Key" : "Name", "Value" : "internal-ALB-security-group" }
+        ],
+        "GroupDescription" : "Security Group for internal ALB",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [
+          { "IpProtocol" : "-1", "FromPort" : "0", "ToPort" : "65535", "CidrIp" : "0.0.0.0/0" }
+        ],
+        "SecurityGroupEgress" : [
+          { "IpProtocol" : "-1", "FromPort" : "0", "ToPort" : "65535", "CidrIp" : "0.0.0.0/0" }
+        ]
+      }
+    },
+
+    "InternalLB": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Scheme" : "internal",
+        "Subnets": { "Ref": "PrivateVpcSubnetIds" },
+        "SecurityGroups": [ 
+          { "Ref" : "InternalSecurityGroup" } 
+        ],
+        "Tags" : [
+          { "Key" : "Name", "Value" : "internal-alb" }
+        ]
+      }
+    },
+    "InternalLBListener" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties" : {
+        "DefaultActions" : [
+          {
+            "Type" : "forward",
+            "TargetGroupArn" : { "Ref" : "HTTPTargetGroup" }
+          }
+        ],
+        "LoadBalancerArn" : { "Ref" : "InternalLB" },
+        "Port" : "80",
+        "Protocol" : "HTTP"
+      }
+    },
+    "InternalHTTPSListener" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties" : {
+        "DefaultActions" : [
+          {
+            "Type" : "forward",
+            "TargetGroupArn" : { "Ref" : "HTTPSTargetGroup" }
+          }
+        ],
+        "LoadBalancerArn" : { "Ref" : "InternalLB" },
+        "Port" : "443",
+        "Protocol" : "HTTPS",
+        "Certificates": [{ "CertificateArn": {"Ref" : "IAMCertificateARN" }}]
+      }
+    },
+    "HTTPTargetGroup" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties" : {
+        "HealthCheckIntervalSeconds" : 30,
+        "UnhealthyThresholdCount" : 5,
+        "HealthCheckPath" : "/healthz",
+        "Port" : 80,
+        "Protocol" : "HTTP",
+        "VpcId" : { "Ref": "VpcId" }
+      }
+    },
+    "HTTPSTargetGroup" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties" : {
+        "HealthCheckIntervalSeconds" : 30,
+        "UnhealthyThresholdCount" : 5,
+        "HealthCheckPath" : "/healthz",
+        "Port" : 443,
+        "Protocol" : "HTTPS",
+        "VpcId" : { "Ref": "VpcId" }
+      }
+    },
+
+
+    "RancherHTTPSTargetGroup" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties" : {
+        "HealthCheckIntervalSeconds" : 30,
+        "UnhealthyThresholdCount" : 5,
+        "HealthCheckPath" : "/ping",
+        "Port" : 443,
+        "Protocol" : "HTTPS",
+        "VpcId" : { "Ref": "VpcId" }
+      }
+    },
+    "RancherHTTPSListenerRule": {
+      "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+      "Properties": {
+        "Actions": [{
+          "Type": "forward",
+          "TargetGroupArn": { "Ref": "RancherHTTPSTargetGroup" }
+        }],
+        "Conditions": [{
+          "Field": "host-header",
+          "Values": [ { "Fn::Join": ["", [ "rancher", ".", { "Ref": "HostedZoneName" }] ] } ]
+        }],
+        "ListenerArn": { "Ref": "InternalHTTPSListener" },
+        "Priority": 1
+      }
+    },
+    "RancherHTTPTargetGroup" : {
+      "Type" : "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties" : {
+        "HealthCheckIntervalSeconds" : 30,
+        "UnhealthyThresholdCount" : 5,
+        "HealthCheckPath" : "/ping",
+        "Port" : 80,
+        "Protocol" : "HTTP",
+        "Matcher" : {
+          "HttpCode" : "302"
+        },
+        "VpcId" : { "Ref": "VpcId" }
+      }
+    },
+    "RancherHTTPListenerRule": {
+      "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+      "Properties": {
+        "Actions": [{
+          "Type": "forward",
+          "TargetGroupArn": { "Ref": "RancherHTTPTargetGroup" }
+        }],
+        "Conditions": [{
+          "Field": "host-header",
+          "Values": [ { "Fn::Join": ["", [ "rancher", ".", { "Ref": "HostedZoneName" }] ] } ]
+        }],
+        "ListenerArn": { "Ref": "InternalLBListener" },
+        "Priority": 2
+      }
+    }
+  }
+}
